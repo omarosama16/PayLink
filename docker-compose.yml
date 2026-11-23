@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: paylink-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paylink
+      POSTGRES_USER: paylink
+      POSTGRES_PASSWORD: paylink_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paylink -d paylink"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: paylink-backend
+    restart: unless-stopped
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/paylink
+      SPRING_DATASOURCE_USERNAME: paylink
+      SPRING_DATASOURCE_PASSWORD: paylink_dev_password
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: paylink-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend      
+
+volumes:
+  postgres_data:
