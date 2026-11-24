@@ -1,0 +1,63 @@
+@startuml
+left to right direction
+actor Customer
+actor Agent
+actor "Support Employee" as Support
+actor Admin
+actor Biller
+actor "Notification Provider" as NotifProvider
+
+rectangle PayLink {
+  usecase "Register" as UC1
+  usecase "Top up wallet" as UC2
+  usecase "View balance and history" as UC3
+  usecase "View billers and fields" as UC4
+  usecase "Bill inquiry" as UC5
+  usecase "Pay a bill" as UC6
+  usecase "Check fraud rules" as UC7
+  usecase "Calculate fee" as UC8
+  usecase "Hold funds" as UC9
+  usecase "Send notification" as UC10
+  usecase "Pay on behalf of customer" as UC11
+  usecase "Request refund" as UC12
+  usecase "Search payment by reference" as UC13
+  usecase "Block / unblock account" as UC14
+  usecase "Approve refund" as UC15
+  usecase "Manage billers and services" as UC16
+  usecase "Edit fees and limits" as UC17
+  usecase "Upgrade customer to verified" as UC18
+  usecase "View daily totals" as UC19
+  usecase "Reconcile settlement file" as UC20
+  usecase "Handle biller callback" as UC21
+}
+
+Customer --> UC1
+Customer --> UC2
+Customer --> UC3
+Customer --> UC4
+Customer --> UC5
+Customer --> UC6
+Customer --> UC12
+Agent --> UC11
+Agent --> UC2
+Support --> UC13
+Support --> UC14
+Support --> UC15
+Support --> UC20
+Admin --> UC16
+Admin --> UC17
+Admin --> UC18
+Admin --> UC19
+Biller --> UC21
+Biller --> UC20
+UC10 --> NotifProvider
+
+UC6 ..> UC7 : <<include>>
+UC6 ..> UC8 : <<include>>
+UC6 ..> UC9 : <<include>>
+UC6 ..> UC10 : <<include>>
+UC5 ..> UC8 : <<include>>
+UC11 ..> UC6 : <<include>>
+UC12 ..> UC15 : <<extend>>
+UC21 ..> UC10 : <<include>>
+@enduml
