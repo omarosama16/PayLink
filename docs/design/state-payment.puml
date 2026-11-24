@@ -1,0 +1,21 @@
+@startuml
+[*] --> Initiated
+
+Initiated --> FundsHeld : fraud checks pass and wallet has enough funds
+Initiated --> Rejected : fraud check fails or funds are insufficient
+
+FundsHeld --> SentToBiller : request sent to biller
+
+SentToBiller --> Completed : biller confirms
+SentToBiller --> Failed : biller refuses
+SentToBiller --> Unknown : no answer within the timeout (10 seconds)
+
+Unknown --> Completed : biller later confirms (callback, retry or settlement file)
+Unknown --> Failed : biller later refuses, or reconciliation finds no payment
+
+Failed --> Refunded : hold released to the wallet
+
+Completed --> [*]
+Rejected --> [*]
+Refunded --> [*]
+@enduml

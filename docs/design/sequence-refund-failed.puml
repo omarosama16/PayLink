@@ -1,0 +1,198 @@
+@startuml
+title PayLink - Sequence Diagram: Refund a Failed Payment
+
+autonumber
+hide footbox
+skinparam responseMessageBelowArrow true
+skinparam ParticipantPadding 20
+skinparam BoxPadding 10
+
+' =========================================================
+' PARTICIPANTS - EXACT ORDER
+' =========================================================
+
+actor Customer
+participant PaymentOrchestrator
+participant Payment
+participant Wallet
+participant BillerAdapter
+participant "Biller\n(AquaCo)" as Biller
+participant NotificationEventListener
+participant NotificationProvider
+
+' =========================================================
+' SCENARIO 1 - DIRECT BILLER REFUSAL AND AUTOMATIC HOLD RELEASE
+' =========================================================
+
+== Scenario 1: Direct Biller Refusal & Automatic Hold Release (Hard Case 3) ==
+
+note over PaymentOrchestrator, Wallet
+    PRECONDITION:
+
+    Payment is currently in SentToBiller state.
+
+    totalAmount (bill + fee) is reserved
+    through a HOLD LedgerEntry.
+
+    Funds are held in Wallet and have not
+    yet been captured or released.
+end note
+
+' Step 1 - Biller Refusal
+
+Biller --> BillerAdapter : refused(errorCode, reason)
+BillerAdapter --> PaymentOrchestrator : BillerPaymentResult(Failed, reason)
+
+' Step 2 - Transition to Failed
+
+PaymentOrchestrator -> Payment : fail()
+Payment --> PaymentOrchestrator : SentToBiller -> Failed\n(PaymentTransition recorded)
+
+' Step 3 - Release the Hold
+
+PaymentOrchestrator -> Wallet : releaseHold(totalAmount, reference)
+Wallet --> PaymentOrchestrator : RELEASE_HOLD LedgerEntry created
+
+note over Wallet
+    Ledger-based hold release:
+
+    Held funds return to available balance
+    through a RELEASE_HOLD LedgerEntry.
+
+    No direct balance overwriting.
+end note
+
+PaymentOrchestrator -> PaymentOrchestrator : record AuditLog (who, when, why)
+
+' Step 4 - Transition to Refunded
+
+PaymentOrchestrator -> Payment : refund()
+Payment --> PaymentOrchestrator : Failed -> Refunded\n(final state; PaymentTransition recorded)
+
+note over Payment
+    Refunded is a final payment state.
+    The hold has already been released.
+end note
+
+' Step 5 - Customer Notification (Observer Pattern)
+
+PaymentOrchestrator ->> NotificationEventListener : onPaymentFailed(payment)
+
+NotificationEventListener -> NotificationProvider : send SMS (refusal reason)
+NotificationEventListener -> NotificationProvider : send PUSH (refusal reason)
+
+alt NotificationProvider available
+
+    NotificationProvider --> NotificationEventListener : notifications accepted
+
+else NotificationProvider unavailable
+
+    NotificationProvider --> NotificationEventListener : delivery failure
+
+    NotificationEventListener -> NotificationEventListener : schedule NotificationRetryCommand
+
+    note over NotificationEventListener, NotificationProvider
+        Retry failed notifications up to 3 times.
+
+        After the final unsuccessful retry:
+        mark notification as UNDELIVERED.
+
+        Payment remains Refunded regardless
+        of notification delivery status.
+    end note
+
+end
+
+PaymentOrchestrator --> Customer : payment failed and funds refunded (clear reason)
+
+' =========================================================
+' SCENARIO 2 - UNKNOWN PAYMENT GUARD
+' =========================================================
+
+== Scenario 2: Unknown Payment Guard — NEVER Refunded Automatically ==
+
+note over PaymentOrchestrator, Wallet
+    PRECONDITION:
+
+    Payment timed out after 10 seconds.
+    Current state: Unknown.
+
+    Funds MUST stay held in Wallet.
+    No automatic release or refund is allowed.
+end note
+
+' Step 1 - Attempted Automatic Refund (Forbidden)
+
+PaymentOrchestrator -> Payment : attempt auto-refund while Unknown (guard check)
+Payment --> PaymentOrchestrator : rejected by UnknownStateHandler\n(Unknown -> Refunded NOT allowed)
+
+note over PaymentOrchestrator, Wallet
+    GUARD RULE:
+
+    Unknown -> Refunded is forbidden.
+
+    Funds remain held.
+    Payment state remains Unknown.
+
+    A refund is possible only after
+    Unknown -> Failed -> Refunded.
+end note
+
+' Step 2 - Resolve Unknown Payment
+
+alt RetryCommand / callback confirms payment OR nightly reconciliation finds payment
+
+    ' Branch 1 - Biller Confirms Payment
+
+    PaymentOrchestrator -> Payment : confirm()
+    Payment --> PaymentOrchestrator : Unknown -> Completed\n(final state; PaymentTransition recorded)
+
+    PaymentOrchestrator -> Wallet : captureHold(totalAmount, reference)
+    Wallet --> PaymentOrchestrator : DEBIT LedgerEntry recorded
+
+    note over Wallet
+        Held amount is captured through
+        a DEBIT LedgerEntry.
+
+        No direct balance mutation.
+    end note
+
+    PaymentOrchestrator ->> NotificationEventListener : onPaymentCompleted(payment)
+
+    note over PaymentOrchestrator, Payment
+        Payment is Completed.
+        Funds are captured, not refunded.
+    end note
+
+else RetryCommand / callback receives biller refusal OR nightly reconciliation finds no payment
+
+    ' Branch 2 - Biller Refuses or Reconciliation Finds No Payment
+
+    PaymentOrchestrator -> Payment : fail()
+    Payment --> PaymentOrchestrator : Unknown -> Failed\n(PaymentTransition recorded)
+
+    PaymentOrchestrator -> Wallet : releaseHold(totalAmount, reference)
+    Wallet --> PaymentOrchestrator : RELEASE_HOLD LedgerEntry created
+
+    note over Wallet
+        Held funds return to available balance
+        through a RELEASE_HOLD LedgerEntry.
+
+        No direct balance mutation.
+    end note
+
+    PaymentOrchestrator -> PaymentOrchestrator : record AuditLog (who, when, why)
+
+    PaymentOrchestrator -> Payment : refund()
+    Payment --> PaymentOrchestrator : Failed -> Refunded\n(final state; PaymentTransition recorded)
+
+    PaymentOrchestrator ->> NotificationEventListener : onPaymentFailed(payment)
+
+    NotificationEventListener -> NotificationProvider : send SMS (refusal/refund reason)
+    NotificationEventListener -> NotificationProvider : send PUSH (refusal/refund reason)
+
+    PaymentOrchestrator --> Customer : payment failed after verification; hold released (Refunded)
+
+end
+
+@enduml

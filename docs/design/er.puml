@@ -1,0 +1,316 @@
+@startuml
+title PayLink - PostgreSQL Entity Relationship Diagram
+
+hide circle
+skinparam linetype polyline
+skinparam shadowing false
+skinparam entity {
+    BackgroundColor White
+    BorderColor #263B53
+    FontColor #263B53
+}
+
+' =========================================================
+' 1. CUSTOMERS AND WALLET
+' =========================================================
+
+entity customers {
+    * id : UUID <<PK>>
+    --
+    * name : VARCHAR(150)
+    * phone : VARCHAR(30) <<UNIQUE>>
+    * verification_level : VARCHAR(20)
+    * blocked : BOOLEAN
+    blocked_until : TIMESTAMPTZ
+    * created_at : TIMESTAMPTZ
+}
+
+entity agents {
+    * customer_id : UUID <<PK, FK>>
+    --
+    * terminal_id : VARCHAR(100) <<UNIQUE>>
+    * active : BOOLEAN
+    * created_at : TIMESTAMPTZ
+}
+
+entity wallets {
+    * id : UUID <<PK>>
+    --
+    * customer_id : UUID <<FK, UNIQUE>>
+    * currency : VARCHAR(3)
+    * created_at : TIMESTAMPTZ
+}
+
+entity ledger_entries {
+    * id : UUID <<PK>>
+    --
+    * wallet_id : UUID <<FK>>
+    payment_id : UUID <<FK>>
+    * type : VARCHAR(20)
+    * amount : NUMERIC(19,2)
+    * reference : VARCHAR(150)
+    * created_at : TIMESTAMPTZ
+}
+
+' =========================================================
+' 2. BILLER CATALOG
+' =========================================================
+
+entity billers {
+    * id : UUID <<PK>>
+    --
+    * code : VARCHAR(50) <<UNIQUE>>
+    * name : VARCHAR(150)
+    * protocol : VARCHAR(50)
+    * active : BOOLEAN
+    * created_at : TIMESTAMPTZ
+}
+
+entity services {
+    * id : UUID <<PK>>
+    --
+    * biller_id : UUID <<FK>>
+    * name : VARCHAR(150)
+    * category : VARCHAR(30)
+    * required_fields : JSONB
+    * min_amount : NUMERIC(19,2)
+    * max_amount : NUMERIC(19,2)
+    * active : BOOLEAN
+}
+
+' =========================================================
+' 3. PAYMENT PROCESSING
+' =========================================================
+
+entity payments {
+    * id : UUID <<PK>>
+    --
+    * customer_id : UUID <<FK>>
+    * wallet_id : UUID <<FK>>
+    * service_id : UUID <<FK>>
+    agent_id : UUID <<FK>>
+    * reference : VARCHAR(150) <<UNIQUE>>
+    * idempotency_key : VARCHAR(150) <<UNIQUE>>
+    * amount : NUMERIC(19,2)
+    * fee : NUMERIC(19,2)
+    * total_amount : NUMERIC(19,2)
+    * current_state : VARCHAR(30)
+    * retry_count : INT
+    * created_at : TIMESTAMPTZ
+    * updated_at : TIMESTAMPTZ
+}
+
+entity payment_transitions {
+    * id : UUID <<PK>>
+    --
+    * payment_id : UUID <<FK>>
+    * from_state : VARCHAR(30)
+    * to_state : VARCHAR(30)
+    * event : VARCHAR(100)
+    * occurred_at : TIMESTAMPTZ
+}
+
+' =========================================================
+' 4. FEES AND LIMITS
+' =========================================================
+
+entity fee_and_limit_config {
+    * id : UUID <<PK>>
+    --
+    * basic_daily_limit : NUMERIC(19,2)
+    * verified_daily_limit : NUMERIC(19,2)
+    * min_single_payment_amount : NUMERIC(19,2)
+    * max_single_payment_amount : NUMERIC(19,2)
+    * commission_rate : NUMERIC(5,4)
+    * velocity_payment_threshold : INT
+    * velocity_window_seconds : INT
+    * velocity_block_minutes : INT
+    promotion_biller_code : VARCHAR(50)
+    active_promotion_start : TIMESTAMPTZ
+    active_promotion_end : TIMESTAMPTZ
+    * updated_at : TIMESTAMPTZ
+}
+
+entity fee_rules {
+    * id : UUID <<PK>>
+    --
+    * config_id : UUID <<FK>>
+    * strategy_type : VARCHAR(30)
+    biller_code : VARCHAR(50)
+    service_category : VARCHAR(30)
+    * parameters : JSONB
+    * enabled : BOOLEAN
+}
+
+' =========================================================
+' 5. NOTIFICATIONS
+' =========================================================
+
+entity notifications {
+    * id : UUID <<PK>>
+    --
+    * customer_id : UUID <<FK>>
+    * payment_id : UUID <<FK>>
+    * channel : VARCHAR(20)
+    * recipient : VARCHAR(255)
+    * template : VARCHAR(150)
+    * status : VARCHAR(20)
+    * retry_count : INT
+    * created_at : TIMESTAMPTZ
+}
+
+' =========================================================
+' 6. AUDIT LOGS
+' =========================================================
+
+entity audit_logs {
+    * id : UUID <<PK>>
+    --
+    * actor_id : UUID
+    * actor_role : VARCHAR(20)
+    * action : VARCHAR(100)
+    * target_entity : VARCHAR(100)
+    target_id : UUID
+    * reason : VARCHAR(500)
+    * created_at : TIMESTAMPTZ
+}
+
+' =========================================================
+' 7. SETTLEMENT
+' =========================================================
+
+entity settlement_files {
+    * id : UUID <<PK>>
+    --
+    * biller_id : UUID <<FK>>
+    * settlement_date : DATE
+    * uploaded_at : TIMESTAMPTZ
+}
+
+entity settlement_records {
+    * id : UUID <<PK>>
+    --
+    * settlement_file_id : UUID <<FK>>
+    * biller_reference : VARCHAR(150)
+    * payment_reference : VARCHAR(150)
+    * amount : NUMERIC(19,2)
+    * settlement_status : VARCHAR(20)
+}
+
+' =========================================================
+' 8. RECONCILIATION
+' =========================================================
+
+entity reconciliation_reports {
+    * id : UUID <<PK>>
+    --
+    * settlement_file_id : UUID <<FK>>
+    * generated_at : TIMESTAMPTZ
+    * matched_count : INT
+    * unmatched_count : INT
+    * discrepancy_count : INT
+}
+
+entity reconciliation_discrepancies {
+    * id : UUID <<PK>>
+    --
+    * report_id : UUID <<FK>>
+    payment_id : UUID <<FK>>
+    * payment_reference : VARCHAR(150)
+    * settlement_reference : VARCHAR(150)
+    * paylink_state : VARCHAR(30)
+    * settlement_state : VARCHAR(30)
+    * description : VARCHAR(500)
+}
+
+' =========================================================
+' RELATIONSHIPS - CUSTOMERS AND WALLETS
+' =========================================================
+
+customers ||--o| agents : "extends customer"
+customers ||--|| wallets : "owns wallet"
+wallets ||--o{ ledger_entries : "records entries"
+
+' =========================================================
+' RELATIONSHIPS - BILLER CATALOG
+' =========================================================
+
+billers ||--o{ services : "offers services"
+
+' =========================================================
+' RELATIONSHIPS - PAYMENT PROCESSING
+' =========================================================
+
+customers ||--o{ payments : "initiates payments"
+wallets ||--o{ payments : "funds payments"
+services ||--o{ payments : "used by payments"
+agents |o--o{ payments : "processes payments"
+payments ||--o{ payment_transitions : "has transition history"
+
+payments |o--o{ ledger_entries : "references ledger entries"
+
+' =========================================================
+' RELATIONSHIPS - FEES AND LIMITS
+' =========================================================
+
+fee_and_limit_config ||--o{ fee_rules : "defines fee rules"
+
+' =========================================================
+' RELATIONSHIPS - NOTIFICATIONS
+' =========================================================
+
+customers ||--o{ notifications : "receives notifications"
+payments ||--o{ notifications : "generates notifications"
+
+' =========================================================
+' RELATIONSHIPS - SETTLEMENT
+' =========================================================
+
+billers ||--o{ settlement_files : "provides settlement files"
+settlement_files ||--o{ settlement_records : "contains records"
+
+' =========================================================
+' RELATIONSHIPS - RECONCILIATION
+' =========================================================
+
+settlement_files ||--o{ reconciliation_reports : "reconciled by"
+reconciliation_reports ||--o{ reconciliation_discrepancies : "contains discrepancies"
+
+payments |o--o{ reconciliation_discrepancies : "may be referenced by"
+
+' =========================================================
+' DOMAIN CONSTRAINTS
+' =========================================================
+
+note right of wallets
+    No stored balance columns.
+    Available and held balances are
+    computed from ledger_entries.
+end note
+
+note right of payments
+    Exactly 8 states:
+    Initiated, FundsHeld, SentToBiller,
+    Completed, Failed, Unknown, Rejected,
+    Refunded.
+
+    Exactly 9 transitions:
+    Initiated -> FundsHeld
+    Initiated -> Rejected
+    FundsHeld -> SentToBiller
+    SentToBiller -> Completed
+    SentToBiller -> Failed
+    SentToBiller -> Unknown
+    Unknown -> Completed
+    Unknown -> Failed
+    Failed -> Refunded
+
+    Final states: Completed, Rejected,
+    Refunded. Unknown is never refunded
+    automatically.
+
+    reference and idempotency_key are
+    both UNIQUE and NOT NULL.
+end note
+
+@enduml

@@ -1,0 +1,680 @@
+@startuml
+title PayLink - Domain Class Diagram
+
+hide empty members
+left to right direction
+skinparam packageStyle rectangle
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+
+' =========================================================
+' 1. ACCOUNTS AND WALLET
+' =========================================================
+package "Accounts and Wallet" {
+
+    class Customer {
+        - id: UUID
+        - name: String
+        - phone: String
+        - verificationLevel: VerificationLevel
+        - blocked: boolean
+        - blockedUntil: Instant
+    }
+
+    class Agent {
+        - terminalId: String
+    }
+
+    class Wallet {
+        - id: UUID
+        - currency: Currency
+        + getAvailableBalance(): BigDecimal
+        + getHeldBalance(): BigDecimal
+        + topUp(amount: BigDecimal, ref: String): LedgerEntry
+        + hold(amount: BigDecimal, ref: String): LedgerEntry
+        + releaseHold(amount: BigDecimal, ref: String): LedgerEntry
+        + captureHold(amount: BigDecimal, ref: String): LedgerEntry
+    }
+
+    class LedgerEntry {
+        - id: UUID
+        - type: LedgerEntryType
+        - amount: BigDecimal
+        - reference: String
+        - createdAt: Instant
+    }
+
+    class AuditLog {
+        - id: UUID
+        - actorId: UUID
+        - actorRole: String
+        - action: String
+        - targetEntity: String
+        - reason: String
+        - createdAt: Instant
+    }
+
+    enum VerificationLevel {
+        BASIC
+        VERIFIED
+    }
+
+    enum LedgerEntryType {
+        TOP_UP
+        HOLD
+        RELEASE_HOLD
+        DEBIT
+        FEE_INCOME
+        COMMISSION
+        REFUND
+    }
+
+    Customer <|-- Agent
+    Customer "1" *-- "1" Wallet : owns
+    Wallet "1" *-- "0..*" LedgerEntry : records
+
+    note right of Wallet
+        Balances are calculated from
+        LedgerEntry records.
+
+        No stored availableBalance
+        or heldBalance attributes.
+
+        captureHold records a DEBIT entry.
+    end note
+
+    note right of AuditLog
+        actorRole identifies the actor:
+        CUSTOMER, AGENT, SUPPORT, ADMIN.
+    end note
+}
+
+' =========================================================
+' 2. BILLER CATALOG
+' =========================================================
+package "Biller Catalog" {
+
+    class Biller {
+        - id: UUID
+        - code: String
+        - name: String
+        - protocol: String
+        - active: boolean
+    }
+
+    class BillerService {
+        - id: UUID
+        - name: String
+        - category: ServiceCategory
+        - requiredFields: List<String>
+        - minAmount: BigDecimal
+        - maxAmount: BigDecimal
+        - active: boolean
+    }
+
+    enum ServiceCategory {
+        ELECTRICITY
+        WATER
+        MOBILE
+        INTERNET
+    }
+
+    Biller "1" *-- "0..*" BillerService : offers
+}
+
+' =========================================================
+' 3. PAYMENT PROCESSING
+' =========================================================
+package "Payment Processing" {
+
+    class Payment {
+        - id: UUID
+        - reference: String
+        - idempotencyKey: String
+        - amount: BigDecimal
+        - fee: BigDecimal
+        - totalAmount: BigDecimal
+        - currentState: PaymentState
+        - createdAt: Instant
+        + holdFunds(): PaymentTransition
+        + sendToBiller(): PaymentTransition
+        + confirm(): PaymentTransition
+        + fail(): PaymentTransition
+        + markUnknown(): PaymentTransition
+        + reject(): PaymentTransition
+        + refund(): PaymentTransition
+    }
+
+    class PaymentTransition {
+        - id: UUID
+        - fromState: PaymentState
+        - toState: PaymentState
+        - event: String
+        - occurredAt: Instant
+    }
+
+    enum PaymentState {
+        Initiated
+        FundsHeld
+        SentToBiller
+        Completed
+        Failed
+        Unknown
+        Rejected
+        Refunded
+    }
+
+    interface PaymentStateHandler <<State>> {
+        + holdFunds(payment: Payment): PaymentTransition
+        + sendToBiller(payment: Payment): PaymentTransition
+        + confirm(payment: Payment): PaymentTransition
+        + fail(payment: Payment): PaymentTransition
+        + markUnknown(payment: Payment): PaymentTransition
+        + reject(payment: Payment): PaymentTransition
+        + refund(payment: Payment): PaymentTransition
+    }
+
+    class InitiatedStateHandler <<ConcreteState>>
+    class FundsHeldStateHandler <<ConcreteState>>
+    class SentToBillerStateHandler <<ConcreteState>>
+    class CompletedStateHandler <<ConcreteState>>
+    class FailedStateHandler <<ConcreteState>>
+    class UnknownStateHandler <<ConcreteState>>
+    class RejectedStateHandler <<ConcreteState>>
+    class RefundedStateHandler <<ConcreteState>>
+
+    interface PaymentOrchestrator {
+        + initiatePayment(customer: Customer, service: BillerService, amount: BigDecimal, idempotencyKey: String): Payment
+        + processPayment(payment: Payment): Payment
+        + handlePaymentCallback(paymentReference: String, state: PaymentState): Payment
+    }
+
+    class RetryCommand <<Command>> {
+        - paymentId: UUID
+        - attemptCount: int
+        + execute(): void
+    }
+
+    class RetryPolicy <<ValueObject>> {
+        - maxAttempts: int
+        - retryDelays: List<Duration>
+    }
+
+    Payment "1" *-- "0..*" PaymentTransition : transition history
+    Payment "1" --> "1" PaymentStateHandler : delegates state changes to
+    Payment "0..*" --> "1" Customer : initiated by
+    Payment "0..*" --> "1" BillerService : pays for
+    Payment "0..*" --> "1" Wallet : uses
+    Payment "0..*" --> "0..1" Agent : processed by (optional)
+
+    InitiatedStateHandler ..|> PaymentStateHandler
+    FundsHeldStateHandler ..|> PaymentStateHandler
+    SentToBillerStateHandler ..|> PaymentStateHandler
+    CompletedStateHandler ..|> PaymentStateHandler
+    FailedStateHandler ..|> PaymentStateHandler
+    UnknownStateHandler ..|> PaymentStateHandler
+    RejectedStateHandler ..|> PaymentStateHandler
+    RefundedStateHandler ..|> PaymentStateHandler
+
+    InitiatedStateHandler ..> PaymentState : represents Initiated
+    FundsHeldStateHandler ..> PaymentState : represents FundsHeld
+    SentToBillerStateHandler ..> PaymentState : represents SentToBiller
+    CompletedStateHandler ..> PaymentState : represents Completed
+    FailedStateHandler ..> PaymentState : represents Failed
+    UnknownStateHandler ..> PaymentState : represents Unknown
+    RejectedStateHandler ..> PaymentState : represents Rejected
+    RefundedStateHandler ..> PaymentState : represents Refunded
+
+    RetryCommand "0..*" --> "1" Payment : retries
+    RetryCommand "0..*" --> "1" RetryPolicy : follows policy
+    RetryCommand ..> PaymentOrchestrator : re-queries status
+
+    note right of PaymentStateHandler
+        Exactly nine allowed transitions:
+
+        Initiated -> FundsHeld : holdFunds
+        Initiated -> Rejected : reject
+
+        FundsHeld -> SentToBiller : sendToBiller
+
+        SentToBiller -> Completed : confirm
+        SentToBiller -> Failed : fail
+        SentToBiller -> Unknown : markUnknown
+
+        Unknown -> Completed : confirm
+        Unknown -> Failed : fail
+
+        Failed -> Refunded : refund
+
+        Completed, Rejected, and Refunded are final.
+        Unknown is never refunded automatically.
+    end note
+
+    note right of PaymentState
+        Exactly eight canonical states.
+        Consistent with the Payment State
+        Diagram and PostgreSQL ER Diagram.
+    end note
+
+    note right of RetryPolicy
+        Unknown payment re-query policy:
+
+        Maximum 3 attempts.
+        Delays: 1, 5, and 15 minutes.
+
+        Retry values are configurable,
+        not hardcoded in RetryCommand.
+    end note
+}
+
+' =========================================================
+' 4. BILLER INTEGRATION
+' =========================================================
+package "Biller Integration" {
+
+    interface BillerAdapter <<Adapter>> {
+        + inquireBill(service: BillerService, accountReference: String, fields: Map<String, String>): BillInquiryResult
+        + payBill(payment: Payment): BillerPaymentResult
+        + queryStatus(reference: String): PaymentState
+    }
+
+    class ElectroCoAdapter <<Adapter>>
+    class AquaCoAdapter <<Adapter>>
+    class TopUpNetAdapter <<Adapter>> {
+        + handleCallback(callback: BillerCallback): void
+    }
+    class NetCoAdapter <<Adapter>>
+
+    class BillerAdapterFactory <<Factory>> {
+        + getAdapter(biller: Biller): BillerAdapter
+    }
+
+    class BillInquiryResult <<ValueObject>> {
+        - billReference: String
+        - customerName: String
+        - amount: BigDecimal
+        - details: Map<String, String>
+    }
+
+    class BillerPaymentResult <<ValueObject>> {
+        - billerReference: String
+        - state: PaymentState
+        - message: String
+    }
+
+    class BillerCallback <<ValueObject>> {
+        - paymentReference: String
+        - state: PaymentState
+        - occurredAt: Instant
+    }
+
+    ElectroCoAdapter ..|> BillerAdapter
+    AquaCoAdapter ..|> BillerAdapter
+    TopUpNetAdapter ..|> BillerAdapter
+    NetCoAdapter ..|> BillerAdapter
+
+    BillerAdapterFactory ..> Biller : identifies protocol
+    BillerAdapterFactory ..> BillerAdapter : creates or selects
+
+    BillerAdapter ..> BillInquiryResult
+    BillerAdapter ..> BillerPaymentResult
+    TopUpNetAdapter ..> BillerCallback
+
+    note right of ElectroCoAdapter
+        REST / JSON
+    end note
+
+    note right of AquaCoAdapter
+        SOAP / XML
+    end note
+
+    note right of TopUpNetAdapter
+        Asynchronous REST
+        with callback handling
+    end note
+
+    note right of NetCoAdapter
+        Batch CSV integration
+    end note
+}
+
+' =========================================================
+' 5. FEES AND COMMISSIONS
+' =========================================================
+package "Fees and Commissions" {
+
+    interface FeeStrategy <<Strategy>> {
+        + calculateFee(amount: BigDecimal): BigDecimal
+    }
+
+    class FixedFeeStrategy <<ConcreteStrategy>> {
+        - rule: FeeRule
+        + calculateFee(amount: BigDecimal): BigDecimal
+    }
+
+    class PercentageFeeStrategy <<ConcreteStrategy>> {
+        - rule: FeeRule
+        + calculateFee(amount: BigDecimal): BigDecimal
+    }
+
+    class TieredFeeStrategy <<ConcreteStrategy>> {
+        - rule: FeeRule
+        + calculateFee(amount: BigDecimal): BigDecimal
+    }
+
+    class PromotionFeeStrategy <<ConcreteStrategy>> {
+        - rule: FeeRule
+        + calculateFee(amount: BigDecimal): BigDecimal
+    }
+
+    class FeeCalculator {
+        - config: FeeAndLimitConfig
+        + selectStrategy(biller: Biller, service: BillerService): FeeStrategy
+        + calculateFee(amount: BigDecimal, biller: Biller, service: BillerService): BigDecimal
+    }
+
+    class FeeAndLimitConfig {
+        - dailyLimits: Map<VerificationLevel, BigDecimal>
+        - minSinglePaymentAmount: BigDecimal
+        - maxSinglePaymentAmount: BigDecimal
+        - feeRules: List<FeeRule>
+        - commissionRate: BigDecimal
+        - velocityPaymentThreshold: int
+        - velocityWindow: Duration
+        - velocityBlockDuration: Duration
+        - promotionBillerCode: String
+        - activePromotionStart: Instant
+        - activePromotionEnd: Instant
+        - updatedAt: Instant
+    }
+
+    class FeeRule <<ValueObject>> {
+        - strategyType: FeeStrategyType
+        - billerCode: String
+        - serviceCategory: ServiceCategory
+        - parameters: Map<String, BigDecimal>
+        - enabled: boolean
+    }
+
+    enum FeeStrategyType {
+        FIXED
+        PERCENTAGE
+        TIERED
+        PROMOTION
+    }
+
+    class CommissionCalculator {
+        - config: FeeAndLimitConfig
+        + calculateCommission(serviceFee: BigDecimal): BigDecimal
+        + creditOnCompletion(payment: Payment, agent: Agent): LedgerEntry
+    }
+
+    FixedFeeStrategy ..|> FeeStrategy
+    PercentageFeeStrategy ..|> FeeStrategy
+    TieredFeeStrategy ..|> FeeStrategy
+    PromotionFeeStrategy ..|> FeeStrategy
+
+    FixedFeeStrategy ..> FeeRule
+    PercentageFeeStrategy ..> FeeRule
+    TieredFeeStrategy ..> FeeRule
+    PromotionFeeStrategy ..> FeeRule
+
+    FeeCalculator "1" --> "1" FeeAndLimitConfig : reads configuration
+    FeeCalculator ..> FeeStrategy : selects
+    FeeCalculator ..> FeeRule : resolves applicable rule
+    FeeCalculator ..> Biller
+    FeeCalculator ..> BillerService
+
+    FeeAndLimitConfig "1" *-- "0..*" FeeRule : defines rules
+
+    CommissionCalculator ..> FeeAndLimitConfig : reads commission rate
+    CommissionCalculator ..> Payment
+    CommissionCalculator ..> Agent
+    CommissionCalculator ..> Wallet : credits agent wallet
+    CommissionCalculator ..> LedgerEntry
+
+    note right of FeeAndLimitConfig
+        Runtime-editable configuration.
+        Changes do not require redeployment.
+
+        Daily limits are configured separately
+        for BASIC and VERIFIED customers.
+
+        Configurable fee rules:
+
+        Fixed: 2.50 EGP.
+        Percentage: 1.5%, minimum 1 EGP.
+        Tiered: 2 EGP for amounts <= 200 EGP.
+        Tiered: 4 EGP for amounts > 200 EGP.
+        Promotion: 0 EGP during active
+        promotion for the configured biller code.
+
+        Commission: 40% of service fee.
+
+        Velocity policy:
+        More than 5 payments within 60 seconds
+        triggers a 10-minute account block.
+
+        Numeric values are configuration data,
+        not hardcoded business-class defaults.
+    end note
+
+    note right of FeeCalculator
+        Resolves the applicable FeeRule
+        from FeeAndLimitConfig.
+
+        Selects the appropriate FeeStrategy.
+
+        Promotion strategy is selected only
+        when the promotion dates are active
+        and the biller code matches.
+    end note
+}
+
+' =========================================================
+' 6. FRAUD CHECKS
+' =========================================================
+package "Fraud Checks" {
+
+    abstract class FraudCheckHandler <<ChainOfResponsibility>> {
+        # next: FraudCheckHandler
+        + setNext(next: FraudCheckHandler): FraudCheckHandler
+        + check(payment: Payment, customer: Customer, wallet: Wallet): FraudCheckResult
+    }
+
+    class BlockedAccountCheck
+
+    class SinglePaymentLimitCheck {
+        - config: FeeAndLimitConfig
+    }
+
+    class DailyLimitCheck {
+        - config: FeeAndLimitConfig
+    }
+
+    class VelocityCheck {
+        - config: FeeAndLimitConfig
+    }
+
+    class FraudCheckResult <<ValueObject>> {
+        - allowed: boolean
+        - reason: String
+    }
+
+    BlockedAccountCheck --|> FraudCheckHandler
+    SinglePaymentLimitCheck --|> FraudCheckHandler
+    DailyLimitCheck --|> FraudCheckHandler
+    VelocityCheck --|> FraudCheckHandler
+
+    FraudCheckHandler "0..1" --> "0..1" FraudCheckHandler : next handler
+
+    FraudCheckHandler ..> FraudCheckResult
+    SinglePaymentLimitCheck ..> FeeAndLimitConfig
+    DailyLimitCheck ..> FeeAndLimitConfig
+    VelocityCheck ..> FeeAndLimitConfig
+
+    note right of FraudCheckHandler
+        Each handler performs its own check.
+
+        If the check passes, processing
+        continues to the next handler.
+
+        Otherwise, processing is rejected.
+    end note
+
+    note right of VelocityCheck
+        Reads the payment threshold,
+        time window, and block duration
+        from FeeAndLimitConfig.
+
+        Configured policy:
+        More than 5 payments in 60 seconds
+        blocks the customer for 10 minutes.
+    end note
+}
+
+' =========================================================
+' 7. NOTIFICATIONS
+' =========================================================
+package "Notifications" {
+
+    interface PaymentEventListener <<Observer>> {
+        + onPaymentCompleted(payment: Payment): void
+        + onPaymentFailed(payment: Payment): void
+    }
+
+    class NotificationEventListener <<ConcreteObserver>> {
+        + onPaymentCompleted(payment: Payment): void
+        + onPaymentFailed(payment: Payment): void
+    }
+
+    class Notification {
+        - id: UUID
+        - channel: NotificationChannel
+        - recipient: String
+        - template: String
+        - status: NotificationStatus
+        - retryCount: int
+    }
+
+    enum NotificationChannel {
+        SMS
+        EMAIL
+        PUSH
+    }
+
+    enum NotificationStatus {
+        PENDING
+        SENT
+        UNDELIVERED
+    }
+
+    class NotificationRetryCommand <<Command>> {
+        - notificationId: UUID
+        - attemptCount: int
+        + execute(notification: Notification): void
+    }
+
+    class NotificationRetryPolicy <<ValueObject>> {
+        - maxRetries: int
+        - retryDelays: List<Duration>
+    }
+
+    NotificationEventListener ..|> PaymentEventListener
+    NotificationEventListener ..> Notification : creates
+    NotificationEventListener ..> Customer : resolves recipient
+
+    Notification "0..*" --> "1" Payment : belongs to payment
+    Customer "1" --> "0..*" Notification : receives
+
+    NotificationRetryCommand "0..*" --> "1" Notification : retries
+    NotificationRetryCommand "0..*" --> "1" NotificationRetryPolicy : follows policy
+
+    PaymentEventListener ..> Payment : observes payment events
+
+    note right of PaymentEventListener
+        Observer is notified when a payment
+        reaches Completed or Failed.
+    end note
+
+    note right of NotificationRetryPolicy
+        Failed notifications are retried
+        up to 3 times.
+
+        After the final unsuccessful retry,
+        status becomes UNDELIVERED.
+
+        Retry policy is configurable.
+    end note
+}
+
+' =========================================================
+' 8. RECONCILIATION
+' =========================================================
+package "Reconciliation" {
+
+    class SettlementFile {
+        - id: UUID
+        - billerCode: String
+        - settlementDate: LocalDate
+        - records: List<SettlementRecord>
+    }
+
+    class SettlementRecord <<ValueObject>> {
+        - billerReference: String
+        - paymentReference: String
+        - amount: BigDecimal
+        - settlementStatus: SettlementStatus
+    }
+
+    enum SettlementStatus {
+        PAID
+        FAILED
+        PENDING
+    }
+
+    class ReconciliationService {
+        + reconcile(payments: List<Payment>, settlementFile: SettlementFile): ReconciliationReport
+    }
+
+    class ReconciliationReport {
+        - id: UUID
+        - generatedAt: Instant
+        - matchedCount: int
+        - unmatchedCount: int
+        - discrepancyCount: int
+    }
+
+    class ReconciliationDiscrepancy {
+        - id: UUID
+        - paymentReference: String
+        - settlementReference: String
+        - payLinkState: PaymentState
+        - settlementState: SettlementStatus
+        - description: String
+    }
+
+    SettlementFile "1" *-- "0..*" SettlementRecord : contains
+
+    ReconciliationReport "1" *-- "0..*" ReconciliationDiscrepancy : contains
+    ReconciliationReport "0..*" --> "1" SettlementFile : reconciles
+
+    ReconciliationService ..> Payment : compares
+    ReconciliationService ..> SettlementFile : reads
+    ReconciliationService ..> SettlementRecord
+    ReconciliationService ..> ReconciliationReport
+    ReconciliationService ..> ReconciliationDiscrepancy
+}
+
+' =========================================================
+' MODULE COORDINATION
+' =========================================================
+
+PaymentOrchestrator ..> Wallet : manages funds
+PaymentOrchestrator ..> FraudCheckHandler : validates payment
+PaymentOrchestrator ..> FeeCalculator : calculates fee
+PaymentOrchestrator ..> CommissionCalculator : calculates commission
+PaymentOrchestrator ..> BillerAdapterFactory : selects biller adapter
+PaymentOrchestrator ..> PaymentEventListener : publishes payment events
+
+@enduml
