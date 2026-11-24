@@ -1,0 +1,319 @@
+@startuml
+title PayLink - Sequence Diagram: Pay a Bill
+
+autonumber
+hide footbox
+skinparam responseMessageBelowArrow true
+skinparam ParticipantPadding 20
+skinparam BoxPadding 10
+
+' =========================================================
+' PARTICIPANTS - EXACT ORDER
+' =========================================================
+
+actor Customer
+participant PaymentOrchestrator
+participant FeeCalculator
+participant FraudCheckHandler
+participant Wallet
+participant Payment
+participant BillerAdapter
+participant "Biller\n(ElectroCo)" as Biller
+participant NotificationEventListener
+participant NotificationProvider
+
+' =========================================================
+' STEP 1 - LOGIN AND LIMITS
+' =========================================================
+
+== Step 1: Login & Limits ==
+
+Customer -> PaymentOrchestrator : authenticate(credentials)
+PaymentOrchestrator -> PaymentOrchestrator : identify Customer
+PaymentOrchestrator -> PaymentOrchestrator : read verificationLevel
+
+alt BASIC verification
+    PaymentOrchestrator -> PaymentOrchestrator : apply daily limit = 5,000 EGP
+else VERIFIED verification
+    PaymentOrchestrator -> PaymentOrchestrator : apply daily limit = 30,000 EGP
+end
+
+PaymentOrchestrator --> Customer : authentication successful
+
+' =========================================================
+' STEP 2 - BILL INQUIRY
+' =========================================================
+
+== Step 2: Bill Inquiry ==
+
+Customer -> PaymentOrchestrator : inquireBill(meterNumber, ElectroCo)
+
+note over PaymentOrchestrator, BillerAdapter
+    Factory Pattern:
+    BillerAdapterFactory.getAdapter(biller)
+    returns ElectroCoAdapter.
+    PaymentOrchestrator uses it through BillerAdapter.
+end note
+
+PaymentOrchestrator -> BillerAdapter : inquireBill(service, meterNumber, fields)
+BillerAdapter -> Biller : inquireBill(meterNumber)
+Biller --> BillerAdapter : bill amount due = 350.00 EGP
+BillerAdapter --> PaymentOrchestrator : BillInquiryResult(350.00 EGP)
+
+' =========================================================
+' STEP 3 - FEE AND TOTAL CALCULATION
+' =========================================================
+
+== Step 3: Fee & Total ==
+
+PaymentOrchestrator -> FeeCalculator : calculateFee(amount, biller, service)
+
+note over FeeCalculator
+    Selects applicable FeeStrategy
+    using FeeAndLimitConfig.
+
+    Example: FixedFeeStrategy = 2.50 EGP.
+end note
+
+FeeCalculator --> PaymentOrchestrator : fee = 2.50 EGP
+
+PaymentOrchestrator -> PaymentOrchestrator : calculate totalAmount = 352.50 EGP
+
+PaymentOrchestrator --> Customer : bill = 350.00 EGP\nfee = 2.50 EGP\ntotal = 352.50 EGP
+
+Customer -> PaymentOrchestrator : confirmPayment(idempotencyKey)
+
+' =========================================================
+' STEP 4 - IDEMPOTENCY AND PAYMENT CREATION
+' =========================================================
+
+== Step 4: Payment Submission ==
+
+PaymentOrchestrator -> PaymentOrchestrator : find Payment by idempotencyKey
+
+alt Duplicate idempotencyKey exists
+
+    PaymentOrchestrator --> Customer : return original Payment result
+
+    note over PaymentOrchestrator, Wallet
+        No second charge.
+        No duplicate biller request.
+        Original Payment result is returned.
+    end note
+
+else New idempotencyKey
+
+    PaymentOrchestrator -> Payment : create Payment(currentState = Initiated)
+    Payment --> PaymentOrchestrator : Payment created (Initiated)
+
+    ' -----------------------------------------------------
+    ' STEP 4 - FRAUD CHECKS
+    ' -----------------------------------------------------
+
+    PaymentOrchestrator -> FraudCheckHandler : check(payment, customer, wallet)
+
+    note over FraudCheckHandler
+        Chain of Responsibility:
+
+        BlockedAccountCheck
+            ->
+        SinglePaymentLimitCheck
+            ->
+        DailyLimitCheck
+            ->
+        VelocityCheck
+    end note
+
+    FraudCheckHandler --> PaymentOrchestrator : FraudCheckResult
+
+    alt Fraud checks fail
+
+        PaymentOrchestrator -> Payment : reject()
+        Payment --> PaymentOrchestrator : Initiated -> Rejected
+
+        PaymentOrchestrator --> Customer : payment rejected (fraud check failure)
+
+    else Fraud checks pass
+
+        ' -------------------------------------------------
+        ' STEP 5 - ATOMIC BALANCE CHECK AND HOLD
+        ' -------------------------------------------------
+
+        PaymentOrchestrator -> Wallet : hold(352.50, reference)
+
+        note over Wallet
+            Concurrency protection:
+
+            Validate available balance and append HOLD
+            atomically under the wallet lock.
+
+            No direct balance mutation.
+            Concurrent payments cannot overspend.
+        end note
+
+        alt Insufficient available balance
+
+            Wallet --> PaymentOrchestrator : hold rejected (insufficient funds)
+
+            PaymentOrchestrator -> Payment : reject()
+            Payment --> PaymentOrchestrator : Initiated -> Rejected
+
+            PaymentOrchestrator --> Customer : payment rejected (insufficient balance)
+
+        else Available balance sufficient
+
+            Wallet --> PaymentOrchestrator : HOLD LedgerEntry created
+
+            note over Wallet
+                352.50 EGP moved from available
+                to held balance through ledger entries.
+            end note
+
+            PaymentOrchestrator -> Payment : holdFunds()
+            Payment --> PaymentOrchestrator : Initiated -> FundsHeld
+
+            ' -------------------------------------------------
+            ' STEP 6 - CALL THE BILLER
+            ' -------------------------------------------------
+
+            PaymentOrchestrator -> Payment : sendToBiller()
+            Payment --> PaymentOrchestrator : FundsHeld -> SentToBiller
+
+            PaymentOrchestrator -> BillerAdapter : payBill(payment)
+
+            note over BillerAdapter, Biller
+                Unique payment reference is sent
+                to the biller.
+
+                Response timeout: 10 seconds.
+            end note
+
+            BillerAdapter -> Biller : payBill(reference, amount)
+
+            ' -------------------------------------------------
+            ' STEP 7 AND 8 - BILLER RESPONSE
+            ' -------------------------------------------------
+
+            alt Biller confirms within 10 seconds
+
+                Biller --> BillerAdapter : paid
+                BillerAdapter --> PaymentOrchestrator : BillerPaymentResult(Completed)
+
+                PaymentOrchestrator -> Payment : confirm()
+                Payment --> PaymentOrchestrator : SentToBiller -> Completed
+
+                ' ---------------------------------------------
+                ' WALLET SETTLEMENT AND ACCOUNTING
+                ' ---------------------------------------------
+
+                PaymentOrchestrator -> Wallet : captureHold(352.50, reference)
+                Wallet --> PaymentOrchestrator : DEBIT LedgerEntry recorded
+
+                note over PaymentOrchestrator, Wallet
+                    Completion accounting:
+
+                    1. DEBIT: capture held payment amount.
+                    2. FEE_INCOME: record service fee income.
+                    3. COMMISSION: credit 40% of service fee
+                       to agent wallet if processed by an Agent.
+
+                    All entries are recorded in the ledger.
+                end note
+
+                PaymentOrchestrator -> PaymentOrchestrator : record AuditLog
+
+                ' ---------------------------------------------
+                ' OBSERVER AND NOTIFICATIONS
+                ' ---------------------------------------------
+
+                PaymentOrchestrator ->> NotificationEventListener : onPaymentCompleted(payment)
+
+                NotificationEventListener -> NotificationProvider : send SMS receipt
+                NotificationEventListener -> NotificationProvider : send PUSH receipt
+
+                alt NotificationProvider available
+
+                    NotificationProvider --> NotificationEventListener : notifications accepted
+
+                else NotificationProvider unavailable
+
+                    NotificationProvider --> NotificationEventListener : delivery failure
+
+                    NotificationEventListener -> NotificationEventListener : schedule NotificationRetryCommand
+
+                    note over NotificationEventListener, NotificationProvider
+                        Retry failed notifications up to 3 times.
+                        After the final unsuccessful retry,
+                        mark notification UNDELIVERED.
+
+                        Payment remains Completed regardless
+                        of notification delivery status.
+                    end note
+
+                end
+
+                PaymentOrchestrator --> Customer : payment receipt (Completed)
+
+            else No answer within 10 seconds
+
+                BillerAdapter --> PaymentOrchestrator : timeout (no response)
+
+                PaymentOrchestrator -> Payment : markUnknown()
+                Payment --> PaymentOrchestrator : SentToBiller -> Unknown
+
+                note over PaymentOrchestrator, Wallet
+                    IMPORTANT:
+
+                    Payment state is Unknown.
+                    Funds STAY HELD in Wallet.
+
+                    NEVER refund automatically from Unknown.
+                end note
+
+                PaymentOrchestrator -> PaymentOrchestrator : schedule RetryCommand
+
+                note over PaymentOrchestrator
+                    Re-query Unknown payment status:
+
+                    Attempt 1: after 1 minute.
+                    Attempt 2: after 5 minutes.
+                    Attempt 3: after 15 minutes.
+
+                    Maximum 3 attempts.
+                    If still unresolved, wait for
+                    nightly reconciliation.
+                end note
+
+                PaymentOrchestrator --> Customer : payment is still being processed (Unknown)
+
+            else Biller refuses
+
+                Biller --> BillerAdapter : refused
+                BillerAdapter --> PaymentOrchestrator : BillerPaymentResult(Failed)
+
+                ref over PaymentOrchestrator, NotificationProvider
+                    Biller Refusal & Refund Flow —
+                    see sequence-refund-failed.puml
+                    (SentToBiller -> Failed -> releaseHold
+                    -> Refunded -> Notify Customer)
+                end ref
+
+            end
+        end
+    end
+end
+
+' =========================================================
+' STEP 9 - NIGHTLY RECONCILIATION
+' =========================================================
+
+note across
+    Step 9 (Nightly Reconciliation):
+
+    Biller sends daily SettlementFile.
+    ReconciliationService compares it against PayLink payments,
+    resolves remaining Unknown payments, and flags discrepancies
+    for support.
+end note
+
+@enduml
