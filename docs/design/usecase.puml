@@ -1,5 +1,8 @@
 @startuml
+title PayLink - Use Case Diagram
 left to right direction
+skinparam packageStyle rectangle
+
 actor Customer
 actor Agent
 actor "Support Employee" as Support
@@ -29,8 +32,10 @@ rectangle PayLink {
   usecase "View daily totals" as UC19
   usecase "Reconcile settlement file" as UC20
   usecase "Handle biller callback" as UC21
+  usecase "Release held funds" as UC22
 }
 
+' Primary actors & use cases
 Customer --> UC1
 Customer --> UC2
 Customer --> UC3
@@ -38,26 +43,48 @@ Customer --> UC4
 Customer --> UC5
 Customer --> UC6
 Customer --> UC12
+
 Agent --> UC11
 Agent --> UC2
+
 Support --> UC13
 Support --> UC14
 Support --> UC15
 Support --> UC20
+
 Admin --> UC16
 Admin --> UC17
 Admin --> UC18
 Admin --> UC19
+
 Biller --> UC21
 Biller --> UC20
-UC10 --> NotifProvider
 
+' Notification provider association
+UC10 -- NotifProvider
+
+' Include & extend relationships
 UC6 ..> UC7 : <<include>>
 UC6 ..> UC8 : <<include>>
 UC6 ..> UC9 : <<include>>
 UC6 ..> UC10 : <<include>>
+
 UC5 ..> UC8 : <<include>>
 UC11 ..> UC6 : <<include>>
+
 UC12 ..> UC15 : <<extend>>
+UC12 ..> UC22 : <<include>>
+UC12 ..> UC10 : <<include>>
+
+UC15 ..> UC22 : <<include>>
+UC15 ..> UC10 : <<include>>
+
 UC21 ..> UC10 : <<include>>
+
+note right of UC22
+  Refunds apply to Failed payments
+  by releasing held funds (RELEASE_HOLD).
+  Unknown payments are never refunded
+  automatically before resolution.
+end note
 @enduml

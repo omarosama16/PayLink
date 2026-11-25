@@ -86,7 +86,7 @@ Format: ID | Trace | Priority. Each acceptance criterion is Given / When / Then.
 - Given a BASIC account that already paid 4,900 today, when I pay 200, then it is Rejected (daily limit 5,000).
 
 **US-19 | FR-19 | Should** - As the business I want to stop rapid-fire payments.
-- Given 5 payments in 60 seconds, when a 6th arrives, then it is rejected and the account is blocked for 10 minutes.
+- Given more than 5 payments within any 60‑second window, the 6th payment is rejected and the account is blocked for 10 minutes.
 
 **US-20 | FR-20 | Must** - As support I want to search a payment by reference and see its history.
 - Given a reference, when I search, then I see the payment and every state transition with time.
@@ -111,7 +111,7 @@ Format: ID | Trace | Priority. Each acceptance criterion is Given / When / Then.
 - Given the file lists a payment PayLink has as Failed, then the difference is flagged in the report for support review.
 
 **US-27 | FR-27 | Could** - As a customer I want to request a refund of a completed payment.
-- Given a Completed payment, when I request a refund, then it waits for support; on approval the money returns to my wallet as a ledger entry.
+- Phase 2 (Could): Given a Completed payment, when I request a refund, then it waits for support; on approval the money returns to my wallet as a ledger entry.
 
 **US-28 | FR-28 | Could** - As an admin I want daily totals.
 - Given a day of payments, when I open the dashboard, then I see payments, fees earned, commissions paid and failures per biller.
@@ -156,6 +156,6 @@ Must: FR-1,3,4,5,6,7,8,9,10,11,12,13,14,15,16,18,20,22,25. Should: FR-2,17,19,21
 | 9 | Rounding of 1.5% fee? | Exact decimal, 2 places, HALF_UP, minimum 1 EGP |
 | 10 | Commission during a 0-fee promotion? | 40% of 0 = 0 |
 | 11 | On completed-payment refund, are fee and commission reversed? | Full refund including fee; agent commission reversed |
-| 12 | Is NetCo in scope? | No, optional; not built |
+| 12 | Is NetCo in scope? | Optional / Deferred to Phase 2 |
 | 13 | Available balance definition? | Sum of ledger entries minus held amount |
 | 14 | Who pays when an agent pays for a customer? | Customer wallet is charged; agent gets commission |
